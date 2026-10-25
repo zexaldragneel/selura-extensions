@@ -112,6 +112,14 @@ jobs:
             --dir "$RUNNER_TEMP/doujins-update"
           test -s "$RUNNER_TEMP/doujins-update/seluradoujins.apk"
           mv "$RUNNER_TEMP/doujins-update/seluradoujins.apk" "$RUNNER_TEMP/source-apks/seluradoujins.apk"
+          # One-extension Mangakakalot CDN stream repair (original package & signer).
+          # The 42 other released extension binaries stay identical.
+          mkdir -p "$RUNNER_TEMP/mangakakalot-update"
+          gh release download test-mangakakalot-pr-108-run-2 \
+            --repo "$reader_repo" --pattern seluramangakakalot.apk \
+            --dir "$RUNNER_TEMP/mangakakalot-update"
+          test -s "$RUNNER_TEMP/mangakakalot-update/seluramangakakalot.apk"
+          mv "$RUNNER_TEMP/mangakakalot-update/seluramangakakalot.apk" "$RUNNER_TEMP/source-apks/seluramangakakalot.apk"
           # Exactly 2 legacy + 6 batch + 18 orphaned + 12 expansion + 5 new.
           test "$(find "$RUNNER_TEMP/source-apks" -maxdepth 1 -name '*.apk' | wc -l)" -eq 43
           echo "43 signed APKs downloaded. Signer, APK package, source IDs and versions verified during index generation."
@@ -157,7 +165,7 @@ jobs:
           set -euo pipefail
           git fetch origin repo
           git show FETCH_HEAD:index.json > "$RUNNER_TEMP/previous-index.json"
-          python3 scripts/validate_doujins_update.py \
+          python3 scripts/validate_mangakakalot_update.py \
             "$RUNNER_TEMP/previous-index.json" \
             "$RUNNER_TEMP/public-store/index.json" \
             "$RUNNER_TEMP/public-store" \
