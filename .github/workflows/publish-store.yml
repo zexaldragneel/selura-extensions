@@ -112,10 +112,10 @@ jobs:
             --dir "$RUNNER_TEMP/doujins-update"
           test -s "$RUNNER_TEMP/doujins-update/seluradoujins.apk"
           mv "$RUNNER_TEMP/doujins-update/seluradoujins.apk" "$RUNNER_TEMP/source-apks/seluradoujins.apk"
-          # One-extension Mangakakalot CDN stream repair (original package & signer).
+          # One-extension Mangakakalot CDN + source pacing improvement (original package & signer).
           # The 42 other released extension binaries stay identical.
           mkdir -p "$RUNNER_TEMP/mangakakalot-update"
-          gh release download test-mangakakalot-pr-108-run-2 \
+          gh release download test-mangakakalot-pr-121-run-4 \
             --repo "$reader_repo" --pattern seluramangakakalot.apk \
             --dir "$RUNNER_TEMP/mangakakalot-update"
           test -s "$RUNNER_TEMP/mangakakalot-update/seluramangakakalot.apk"
