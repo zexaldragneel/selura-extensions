@@ -16,8 +16,8 @@
           "iconUrl": "https://raw.githubusercontent.com/zexaldragneel/selura-extensions/repo/icon/selura-nhentai.png"
         },
         "extensionLib": "1.4",
-        "versionCode": 104002,
-        "versionName": "1.4.2",
+        "versionCode": 104004,
+        "versionName": "1.4.4",
         "contentWarning": "NSFW",
         "sources": [
           {
