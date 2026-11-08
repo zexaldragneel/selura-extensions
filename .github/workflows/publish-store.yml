@@ -58,6 +58,14 @@ jobs:
           gh release download test-selura-source-pr-25-run-12 \
             --repo "$reader_repo" --pattern selura-nhentai.apk \
             --dir "$RUNNER_TEMP/source-apks"
+          # Replace only NHentai with signed, CI-verified v4 thumbnail recovery.
+          # Preserve package, source identity and the other 42 extension APKs.
+          mkdir -p "$RUNNER_TEMP/nhentai-v4"
+          gh release download test-selura-nhentai-v3-run-20 \
+            --repo "$reader_repo" --pattern selura-nhentai.apk \
+            --dir "$RUNNER_TEMP/nhentai-v4"
+          test -s "$RUNNER_TEMP/nhentai-v4/selura-nhentai.apk"
+          mv "$RUNNER_TEMP/nhentai-v4/selura-nhentai.apk" "$RUNNER_TEMP/source-apks/selura-nhentai.apk"
           gh release download test-selura-mangadex-pr-26-run-3 \
             --repo "$reader_repo" --pattern selura-mangadex.apk \
             --dir "$RUNNER_TEMP/source-apks"
