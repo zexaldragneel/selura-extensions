@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed guard for publishing exactly one Mangakakalot extension update."""
+"""Fail-closed guard for publishing NHentai v4 while preserving all other extensions."""
 import argparse
 import copy
 import hashlib
@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 from urllib.parse import urlparse
 
-TARGET = "eu.kanade.tachiyomi.extension.en.seluramangakakalot"
+TARGET = "eu.kanade.tachiyomi.extension.all.seluranhentai"
 
 
 def compare_catalog(old: dict, new: dict, expected_count=43, expected_sources=341):
@@ -32,9 +32,9 @@ def compare_catalog(old: dict, new: dict, expected_count=43, expected_sources=34
             old_code, new_code = x.pop("versionCode"), y.pop("versionCode")
             old_ver, new_ver = x.pop("versionName"), y.pop("versionName")
             if new_code <= old_code or new_ver == old_ver:
-                raise ValueError("Mangakakalot version must increase")
+                raise ValueError("NHentai version must increase")
             if x != y:
-                raise ValueError("Mangakakalot source identity or metadata changed")
+                raise ValueError("NHentai source identity or metadata changed")
         elif old_entry != new_entry:
             raise ValueError("Another extension changed: " + pkg)
         for item in new_entry["sources"]:
