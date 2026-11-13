@@ -128,6 +128,14 @@ jobs:
             --dir "$RUNNER_TEMP/mangakakalot-update"
           test -s "$RUNNER_TEMP/mangakakalot-update/seluramangakakalot.apk"
           mv "$RUNNER_TEMP/mangakakalot-update/seluramangakakalot.apk" "$RUNNER_TEMP/source-apks/seluramangakakalot.apk"
+          # Update only Asura Scans from signed and linted PR #168 build.
+          # All other 42 APKs remain byte-for-byte identical.
+          mkdir -p "$RUNNER_TEMP/asura-update"
+          gh release download test-orphaned-18-pr-168-run-9 \
+            --repo "$reader_repo" --pattern seluraasurascans.apk \
+            --dir "$RUNNER_TEMP/asura-update"
+          test -s "$RUNNER_TEMP/asura-update/seluraasurascans.apk"
+          mv "$RUNNER_TEMP/asura-update/seluraasurascans.apk" "$RUNNER_TEMP/source-apks/seluraasurascans.apk"
           # Exactly 2 legacy + 6 batch + 18 orphaned + 12 expansion + 5 new.
           test "$(find "$RUNNER_TEMP/source-apks" -maxdepth 1 -name '*.apk' | wc -l)" -eq 43
           echo "43 signed APKs downloaded. Signer, APK package, source IDs and versions verified during index generation."
@@ -168,12 +176,12 @@ jobs:
           done
           test "$(find "$RUNNER_TEMP/public-store/apk" -maxdepth 1 -name '*.apk' | wc -l)" -eq 43
           sha256sum "$RUNNER_TEMP/public-store/apk/"*.apk
-      - name: Verify 42 unchanged APKs, all source IDs and 43 icons preserved
+      - name: Verify Asura version increase, 42 unchanged APKs and source IDs
         run: |
           set -euo pipefail
           git fetch origin repo
           git show FETCH_HEAD:index.json > "$RUNNER_TEMP/previous-index.json"
-          python3 scripts/validate_mangakakalot_update.py \
+          python3 scripts/validate_asura_update.py \
             "$RUNNER_TEMP/previous-index.json" \
             "$RUNNER_TEMP/public-store/index.json" \
             "$RUNNER_TEMP/public-store" \
