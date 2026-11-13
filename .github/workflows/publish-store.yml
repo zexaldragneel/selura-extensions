@@ -131,7 +131,7 @@ jobs:
           # Update only Asura Scans from signed and linted PR #168 build.
           # All other 42 APKs remain byte-for-byte identical.
           mkdir -p "$RUNNER_TEMP/asura-update"
-          gh release download test-orphaned-18-pr-168-run-9 \
+          gh release download test-orphaned-18-pr-168-run-10 \
             --repo "$reader_repo" --pattern seluraasurascans.apk \
             --dir "$RUNNER_TEMP/asura-update"
           test -s "$RUNNER_TEMP/asura-update/seluraasurascans.apk"
