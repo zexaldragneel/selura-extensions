@@ -1,0 +1,129 @@
+name: Seiryn Extension Health Check (Every 2 Days)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily trigger with UTC epoch-day parity below ensures true 48-hour cadence,
+    # unlike */2 day-of-month which resets at each month boundary.
+    - cron: '40 2 * * *'
+  pull_request:
+    paths:
+      - 'scripts/check_extension_health.py'
+      - 'tests/test_extension_health.py'
+      - '.github/workflows/extension-health.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seiryn-extension-health
+  cancel-in-progress: false
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check 48-hour cadence
+        id: cadence
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" != "schedule" ]] || (( ($(date -u +%s) / 86400) % 2 == 0 )); then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping alternate UTC day; exact 48-hour schedule." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Checkout monitor
+        if: steps.cadence.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run monitoring tests
+        if: steps.cadence.outputs.run == 'true'
+        run: |
+          python3 -m unittest discover -s tests -p 'test_extension_health.py' -v
+          python3 -m compileall -q scripts/check_extension_health.py
+
+      - name: Fetch live public extension catalog
+        if: steps.cadence.outputs.run == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/extension-health"
+          curl --fail --location --retry 2 --max-time 45 --silent --show-error \
+            https://raw.githubusercontent.com/zexaldragneel/selura-extensions/repo/index.json \
+            -o "$RUNNER_TEMP/extension-health/index.json"
+
+      - name: Probe all 43 published extensions
+        if: steps.cadence.outputs.run == 'true'
+        run: |
+          PYTHONPATH=scripts python3 scripts/check_extension_health.py \
+            --catalog "$RUNNER_TEMP/extension-health/index.json" \
+            --output-dir "$RUNNER_TEMP/extension-health"
+
+      - name: Summarize results
+        if: always() && steps.cadence.outputs.run == 'true'
+        run: |
+          if test -s "$RUNNER_TEMP/extension-health/health.md"; then
+            cat "$RUNNER_TEMP/extension-health/health.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Health check did not complete; inspect workflow logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report artifacts
+        if: always() && steps.cadence.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: seiryn-extension-health
+          path: |
+            ${{ runner.temp }}/extension-health/health.json
+            ${{ runner.temp }}/extension-health/health.md
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Create or update a single open monitoring issue
+        if: always() && steps.cadence.outputs.run == 'true' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          report_dir = pathlib.Path(os.environ["RUNNER_TEMP"]) / "extension-health"
+          report_path = report_dir / "health.json"
+          try:
+              report = json.loads(report_path.read_text())
+              failures = [x for x in report["extensions"] if x["status"] != "OK"]
+              bad = bool(failures) or "error" in report
+          except (OSError, ValueError, KeyError):
+              failures = []
+              bad = True
+          title = "Seiryn extension health: attention required"
+          issues = json.loads(subprocess.check_output(
+              ["gh", "issue", "list", "--repo", os.environ["GH_REPO"], "--state", "open",
+               "--limit", "100", "--json", "number,title"], text=True))
+          matching = next((x for x in issues if x["title"] == title), None)
+          if not bad:
+              if matching:
+                  subprocess.run(["gh", "issue", "close", str(matching["number"]), "--repo", os.environ["GH_REPO"],
+                                  "--comment", "Latest 48-hour homepage sample is healthy. Closing this monitoring alert."], check=True)
+          else:
+              summary = (report_dir / "health.md").read_text() if (report_dir / "health.md").exists() else "Health check failed before report generation. Review GitHub Actions logs."
+              body = ("Automated read-only homepage sampling (not proof that chapter parsing works).\n\n" +
+                      summary[:45000] + "\nWorkflow: " + os.environ["GITHUB_SERVER_URL"] + "/" +
+                      os.environ["GH_REPO"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"])
+              body_file = report_dir / "issue.md"
+              body_file.write_text(body)
+              if matching:
+                  subprocess.run(["gh", "issue", "edit", str(matching["number"]), "--repo", os.environ["GH_REPO"],
+                                  "--body-file", str(body_file)], check=True)
+              else:
+                  subprocess.run(["gh", "issue", "create", "--repo", os.environ["GH_REPO"],
+                                  "--title", title, "--body-file", str(body_file)], check=True)
+          PY
