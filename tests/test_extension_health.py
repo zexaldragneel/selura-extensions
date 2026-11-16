@@ -33,6 +33,20 @@ class HealthTests(unittest.TestCase):
         self.assertEqual([x["status"] for x in report["extensions"]], ["OK", "DEGRADED"])
         self.assertIn("Beta", health.markdown(report))
 
+    def test_cloudflare_challenge_signals(self):
+        self.assertEqual(health.classify_response(403, {"cf-mitigated": "challenge"})["category"], "POSSIBLE_CLOUDFLARE_CHALLENGE")
+        self.assertEqual(health.classify_response(200, {}, b"<title>Just a moment...</title>")["status"], "DEGRADED")
+        self.assertEqual(health.classify_response(503)["category"], "SERVER_ERROR")
+        self.assertEqual(health.classify_response(403)["category"], "ACCESS_RESTRICTED")
+        self.assertEqual(health.classify_response(200)["category"], "HOMEPAGE_REACHABLE")
+
+    def test_functional_checks_are_not_claimed_without_runtime(self):
+        with patch.object(health, "checked_catalog", return_value=[
+            ({"name": "Alpha", "package": "a"}, {"sources": [{"homeUrl": "https://example.org", "id": 1}]})
+        ]):
+            report = health.audit({}, probe_fn=lambda _: {"status": "OK", "detail": "HTTP 200"})
+        self.assertEqual(set(report["extensions"][0]["functionalChecks"].values()), {"NOT_TESTED"})
+
     def test_http_status_is_not_misrepresented_as_chapter_success(self):
         self.assertIn("No chapter", health.audit.__doc__ or "No chapter") if health.audit.__doc__ else self.assertIn("No chapter", health.markdown({
             "extensionCount": 0, "sourceIdentityCount": 0, "uniqueOriginsProbed": 0,
