@@ -39,21 +39,43 @@ def public_https(url):
     return True
 
 
+FUNCTIONAL_STAGES = ("discovery", "manga_details", "chapter_list", "chapter_images", "download")
+
+def classify_response(status, headers=None, body=b""):
+    """Classify HTTP signals; do not infer that Kotlin extension parsing works."""
+    headers = headers or {}
+    header_values = {str(k).lower(): str(v).lower() for k, v in headers.items()}
+    sample = body[:4096].lower()
+    if (b"cf-chl-" in sample or b"just a moment" in sample or
+        b"checking your browser" in sample or
+        header_values.get("cf-mitigated") == "challenge"):
+        return {"status": "DEGRADED", "category": "POSSIBLE_CLOUDFLARE_CHALLENGE", "detail": f"HTTP {status}"}
+    if status in (401, 403, 429):
+        return {"status": "DEGRADED", "category": "ACCESS_RESTRICTED", "detail": f"HTTP {status}"}
+    if status == 404:
+        return {"status": "DEGRADED", "category": "HOMEPAGE_NOT_FOUND", "detail": "HTTP 404"}
+    if status >= 500:
+        return {"status": "ERROR", "category": "SERVER_ERROR", "detail": f"HTTP {status}"}
+    if 200 <= status < 400:
+        return {"status": "OK", "category": "HOMEPAGE_REACHABLE", "detail": f"HTTP {status}"}
+    return {"status": "DEGRADED", "category": "HTTP_ERROR", "detail": f"HTTP {status}"}
+
+
 def probe(url, opener):
     if not public_https(url):
-        return {"status": "ERROR", "detail": "Invalid or non-public HTTPS origin"}
+        return {"status": "ERROR", "category": "UNSAFE_URL", "detail": "Invalid or non-public HTTPS origin"}
     request = Request(url, headers={"User-Agent": "SeirynExtensionHealth/1.0 (read-only; GitHub Actions)", "Accept": "text/html,application/xhtml+xml,*/*;q=0.5"})
     try:
         with opener.open(request, timeout=12) as response:
-            response.read(512)
-            status = response.status
-            return {"status": "OK" if 200 <= status < 400 else "DEGRADED", "detail": f"HTTP {status}"}
+            return classify_response(response.status, response.headers, response.read(4096))
     except HTTPError as exc:
-        status = exc.code
-        return {"status": "DEGRADED" if status in (401, 403, 404, 405, 429) else "ERROR", "detail": f"HTTP {status}"}
+        try:
+            body = exc.read(4096)
+        except OSError:
+            body = b""
+        return classify_response(exc.code, exc.headers, body)
     except (URLError, TimeoutError, OSError, ValueError) as exc:
-        return {"status": "ERROR", "detail": type(exc).__name__}
-
+        return {"status": "ERROR", "category": "NETWORK_ERROR", "detail": type(exc).__name__}
 
 def audit(catalog, delay=1.5, probe_fn=None):
     pairs = checked_catalog(catalog)
@@ -74,6 +96,7 @@ def audit(catalog, delay=1.5, probe_fn=None):
             "DEGRADED" if any(s["status"] == "DEGRADED" for s in samples) else "OK"
         )
         results.append({"name": spec["name"], "package": spec["package"], "status": status, "samples": samples,
+                        "functionalChecks": {stage: "NOT_TESTED" for stage in FUNCTIONAL_STAGES},
                         "sourceCount": len(row["sources"])})
     return {"checkedAt": dt.datetime.now(dt.timezone.utc).isoformat(), "extensionCount": len(results),
             "sourceIdentityCount": sum(r["sourceCount"] for r in results),
@@ -86,9 +109,10 @@ def markdown(report):
     lines = ["# Seiryn extension availability report", "",
              f"Checked {report['extensionCount']} extensions / {report['sourceIdentityCount']} source identities; {report['uniqueOriginsProbed']} distinct HTTPS homepages.",
              f"**OK:** {counts['OK']} · **Degraded:** {counts['DEGRADED']} · **Error:** {counts['ERROR']}", "",
+             "**Functional checks (discovery, manga details, chapter list, images, downloads): NOT TESTED; Kotlin runtime execution is required.**", "",
              "| Extension | Result | Homepage observations |", "|---|---|---|"]
     for item in report["extensions"]:
-        details = "; ".join(f"{s['url']} ({s['detail']})" for s in item["samples"])
+        details = "; ".join(f"{s['url']} ({s.get('category', 'HTTP')}: {s['detail']})" for s in item["samples"])
         lines.append(f"| {item['name'].replace('|', '/')} | {item['status']} | {details.replace('|', '/')} |")
     lines.extend(["", "**Limitations:** " + report["limitations"], "",
                   "No APKs, source IDs, credentials, library data or extension configurations were changed."])
