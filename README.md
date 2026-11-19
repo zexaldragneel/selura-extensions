@@ -44,7 +44,7 @@ See [STORE_MAINTENANCE.md](STORE_MAINTENANCE.md) for security, signing verificat
 
 ## Extension health monitoring
 
-The 48-hour workflow checks homepage availability for the published catalog and
+The daily workflow checks homepage availability for the published catalog and
 classifies possible Cloudflare challenges, access restrictions and outages.
 Its English MangaDex smoke check uses the [MangaDex public API](https://api.mangadex.org/docs/)
 for discovery, details, chapters and a bounded sample from one hosted page.

@@ -1,10 +1,8 @@
-name: Seiryn Extension Health Check (Every 2 Days)
+name: Seiryn Extension Health Check (Daily)
 
 on:
   workflow_dispatch:
   schedule:
-    # Daily trigger with UTC epoch-day parity below ensures true 48-hour cadence,
-    # unlike */2 day-of-month which resets at each month boundary.
     - cron: '40 2 * * *'
   pull_request:
     paths:
@@ -28,32 +26,17 @@ jobs:
       contents: read
       issues: write
     steps:
-      - name: Check 48-hour cadence
-        id: cadence
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" != "schedule" ]] || (( ($(date -u +%s) / 86400) % 2 == 0 )); then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping alternate UTC day; exact 48-hour schedule." >> "$GITHUB_STEP_SUMMARY"
-          fi
-
       - name: Checkout monitor
-        if: steps.cadence.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - name: Run monitoring tests
-        if: steps.cadence.outputs.run == 'true'
         run: |
           python3 -m unittest discover -s tests -p 'test_extension_health.py' -v
           python3 -m compileall -q scripts/check_extension_health.py scripts/functional_extension_health.py
 
       - name: Fetch live public extension catalog
-        if: steps.cadence.outputs.run == 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/extension-health"
           curl --fail --location --retry 2 --max-time 45 --silent --show-error \
@@ -61,14 +44,13 @@ jobs:
             -o "$RUNNER_TEMP/extension-health/index.json"
 
       - name: Probe all 43 published extensions
-        if: steps.cadence.outputs.run == 'true'
         run: |
           PYTHONPATH=scripts python3 scripts/check_extension_health.py \
             --catalog "$RUNNER_TEMP/extension-health/index.json" \
             --output-dir "$RUNNER_TEMP/extension-health"
 
       - name: Summarize results
-        if: always() && steps.cadence.outputs.run == 'true'
+        if: always()
         run: |
           if test -s "$RUNNER_TEMP/extension-health/health.md"; then
             cat "$RUNNER_TEMP/extension-health/health.md" >> "$GITHUB_STEP_SUMMARY"
@@ -77,7 +59,7 @@ jobs:
           fi
 
       - name: Upload report artifacts
-        if: always() && steps.cadence.outputs.run == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: seiryn-extension-health
@@ -88,7 +70,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Create or update a single open monitoring issue
-        if: always() && steps.cadence.outputs.run == 'true' && github.event_name != 'pull_request'
+        if: always() && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -113,7 +95,7 @@ jobs:
           if not bad:
               if matching:
                   subprocess.run(["gh", "issue", "close", str(matching["number"]), "--repo", os.environ["GH_REPO"],
-                                  "--comment", "Latest 48-hour monitoring run found no alerts. Closing this monitoring alert."], check=True)
+                                  "--comment", "Latest daily monitoring run found no alerts. Closing this monitoring alert."], check=True)
           else:
               summary = (report_dir / "health.md").read_text() if (report_dir / "health.md").exists() else "Health check failed before report generation. Review GitHub Actions logs."
               body = ("Automated homepage and supported provider API sampling. See the report for stage coverage.\n\n" +
