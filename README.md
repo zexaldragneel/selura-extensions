@@ -40,3 +40,14 @@ The catalog endpoint contains the JSON metadata and public signed APK/icon URLs.
 - Apache-2.0 upstream licensing and required attribution are preserved. Providers' login rules and access controls must be respected.
 
 See [STORE_MAINTENANCE.md](STORE_MAINTENANCE.md) for security, signing verification, and publishing details.
+
+
+## Extension health monitoring
+
+The 48-hour workflow checks homepage availability for the published catalog and
+classifies possible Cloudflare challenges, access restrictions and outages.
+Its English MangaDex smoke check uses the [MangaDex public API](https://api.mangadex.org/docs/)
+for discovery, details, chapters and a bounded sample from one hosted page.
+Reports distinguish provider checks from Android extension runtime checks.
+Android downloads and stages without a supported provider check are marked
+`NOT_TESTED`. Interrupted provider checks can report `UNKNOWN`.

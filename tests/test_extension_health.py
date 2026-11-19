@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 import unittest
@@ -5,6 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import check_extension_health as health
+import functional_extension_health as functional
 
 
 class HealthTests(unittest.TestCase):
@@ -45,13 +47,44 @@ class HealthTests(unittest.TestCase):
             ({"name": "Alpha", "package": "a"}, {"sources": [{"homeUrl": "https://example.org", "id": 1}]})
         ]):
             report = health.audit({}, probe_fn=lambda _: {"status": "OK", "detail": "HTTP 200"})
-        self.assertEqual(set(report["extensions"][0]["functionalChecks"].values()), {"NOT_TESTED"})
+        self.assertEqual({stage["status"] for stage in report["extensions"][0]["functionalChecks"].values()}, {"NOT_TESTED"})
 
-    def test_http_status_is_not_misrepresented_as_chapter_success(self):
-        self.assertIn("No chapter", health.audit.__doc__ or "No chapter") if health.audit.__doc__ else self.assertIn("No chapter", health.markdown({
-            "extensionCount": 0, "sourceIdentityCount": 0, "uniqueOriginsProbed": 0,
-            "extensions": [], "limitations": "No chapter requests"
-        }))
+    def test_mangadex_provider_path_checks_images_and_leaves_android_download_untested(self):
+        identifier = "00000000-0000-4000-8000-000000000001"
+        manga = {"type": "manga", "id": identifier, "attributes": {"title": {"en": "Sample"}}}
+        chapter = {"type": "chapter", "id": identifier, "attributes": {"pages": 2}}
+        manifest = {
+            "baseUrl": "https://example.org",
+            "chapter": {"hash": "a" * 32, "data": ["1.jpg", "2.jpg"]},
+        }
+        documents = iter([{"data": [manga]}, {"data": manga}, {"data": [chapter]}, manifest])
+        visited = []
+
+        def fetch(url, limit, accept):
+            visited.append(url)
+            if accept == "image/*":
+                return {"status": "OK"}, {"Content-Type": "image/jpeg"}, b"\xff\xd8\xff"
+            return {"status": "OK"}, {}, json.dumps({"result": "ok", **next(documents)}).encode()
+
+        result = functional.check_mangadex(fetch)
+        self.assertEqual([r["status"] for r in result.values()], ["PASS"] * 4 + ["NOT_TESTED"])
+        self.assertEqual(len(visited), 5)
+        self.assertEqual(visited[-1], "https://example.org/data/" + "a" * 32 + "/1.jpg")
+
+    def test_mangadex_access_restriction_stops_downstream_requests(self):
+        for category in ("ACCESS_RESTRICTED", "POSSIBLE_CLOUDFLARE_CHALLENGE", "NETWORK_ERROR"):
+            with self.subTest(category=category):
+                def fetch(url, limit, accept):
+                    self.assertIn("/manga?", url)
+                    return {"status": "DEGRADED", "category": category}, {}, b""
+
+                result = functional.check_mangadex(fetch)
+                self.assertEqual(result["discovery"], {"status": "UNKNOWN", "reason": category})
+                self.assertEqual(result["chapter_list"]["status"], "NOT_TESTED")
+
+    def test_image_signatures_distinguish_html_and_images(self):
+        self.assertFalse(functional.image_signature(b"<html>Access denied</html>"))
+        self.assertTrue(functional.image_signature(b"RIFF....WEBP"))
 
 
 if __name__ == "__main__":

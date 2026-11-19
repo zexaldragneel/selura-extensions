@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only homepage availability sampling for every published Seiryn extension.
-
-This is not a chapter parser, authenticated session, or Cloudflare bypass.
-"""
+"""Read-only homepage and supported provider sampling for published extensions."""
 import argparse
 import datetime as dt
 import ipaddress
@@ -15,6 +12,7 @@ from urllib.parse import urlparse
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
 
 from audit_extension_apks import checked_catalog
+from functional_extension_health import MANGADEX, STAGES, check_mangadex
 
 
 class SafeRedirect(HTTPRedirectHandler):
@@ -26,7 +24,7 @@ class SafeRedirect(HTTPRedirectHandler):
 
 def public_https(url):
     parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None:
         return False
     host = parsed.hostname
     if host in ("localhost",) or host.endswith((".local", ".internal")):
@@ -38,8 +36,6 @@ def public_https(url):
         return False
     return True
 
-
-FUNCTIONAL_STAGES = ("discovery", "manga_details", "chapter_list", "chapter_images", "download")
 
 def classify_response(status, headers=None, body=b""):
     """Classify HTTP signals; do not infer that Kotlin extension parsing works."""
@@ -56,31 +52,39 @@ def classify_response(status, headers=None, body=b""):
         return {"status": "DEGRADED", "category": "HOMEPAGE_NOT_FOUND", "detail": "HTTP 404"}
     if status >= 500:
         return {"status": "ERROR", "category": "SERVER_ERROR", "detail": f"HTTP {status}"}
-    if 200 <= status < 400:
+    if 200 <= status < 300:
         return {"status": "OK", "category": "HOMEPAGE_REACHABLE", "detail": f"HTTP {status}"}
     return {"status": "DEGRADED", "category": "HTTP_ERROR", "detail": f"HTTP {status}"}
 
 
-def probe(url, opener):
+def fetch(url, opener, limit=4096, accept="text/html,application/xhtml+xml,*/*;q=0.5"):
+    empty = ({}, b"")
     if not public_https(url):
-        return {"status": "ERROR", "category": "UNSAFE_URL", "detail": "Invalid or non-public HTTPS origin"}
-    request = Request(url, headers={"User-Agent": "SeirynExtensionHealth/1.0 (read-only; GitHub Actions)", "Accept": "text/html,application/xhtml+xml,*/*;q=0.5"})
+        return {"status": "ERROR", "category": "UNSAFE_URL", "detail": "Invalid or non-public HTTPS origin"}, *empty
+    request = Request(url, headers={"User-Agent": "SeirynExtensionHealth/1.0 (read-only; GitHub Actions)", "Accept": accept})
     try:
         with opener.open(request, timeout=12) as response:
-            return classify_response(response.status, response.headers, response.read(4096))
+            body = response.read(limit)
+            return classify_response(response.status, response.headers, body), response.headers, body
     except HTTPError as exc:
         try:
             body = exc.read(4096)
         except OSError:
             body = b""
-        return classify_response(exc.code, exc.headers, body)
+        exc.close()
+        return classify_response(exc.code, exc.headers, body), *empty
     except (URLError, TimeoutError, OSError, ValueError) as exc:
-        return {"status": "ERROR", "category": "NETWORK_ERROR", "detail": type(exc).__name__}
+        return {"status": "ERROR", "category": "NETWORK_ERROR", "detail": type(exc).__name__}, *empty
 
-def audit(catalog, delay=1.5, probe_fn=None):
+def audit(catalog, delay=1.5, probe_fn=None, functional_fetch=None):
     pairs = checked_catalog(catalog)
     opener = build_opener(HTTPSHandler(), SafeRedirect())
-    probe_fn = probe_fn or (lambda url: probe(url, opener))
+    def provider_fetch(url, limit, accept):
+        time.sleep(delay)
+        return fetch(url, opener, limit, accept)
+
+    probe_fn = probe_fn or (lambda url: fetch(url, opener)[0])
+    functional_fetch = functional_fetch or provider_fetch
     cached = {}
     results = []
     for spec, row in pairs:
@@ -95,13 +99,18 @@ def audit(catalog, delay=1.5, probe_fn=None):
         status = "ERROR" if any(s["status"] == "ERROR" for s in samples) else (
             "DEGRADED" if any(s["status"] == "DEGRADED" for s in samples) else "OK"
         )
+        functional = {stage: {"status": "NOT_TESTED", "reason": "NO_PROVIDER_ADAPTER"} for stage in STAGES}
+        if spec["package"] == MANGADEX:
+            functional = check_mangadex(functional_fetch)
+            if status == "OK" and any(stage["status"] in {"FAIL", "UNKNOWN"} for stage in functional.values()):
+                status = "DEGRADED"
         results.append({"name": spec["name"], "package": spec["package"], "status": status, "samples": samples,
-                        "functionalChecks": {stage: "NOT_TESTED" for stage in FUNCTIONAL_STAGES},
+                        "functionalChecks": functional,
                         "sourceCount": len(row["sources"])})
     return {"checkedAt": dt.datetime.now(dt.timezone.utc).isoformat(), "extensionCount": len(results),
             "sourceIdentityCount": sum(r["sourceCount"] for r in results),
             "uniqueOriginsProbed": len(cached), "extensions": results,
-            "limitations": "Homepage sampling only. No chapter, image, login, Cloudflare bypass or extension runtime checks. HTTP 403/429 can be bot protection, not an extension defect."}
+            "limitations": "All extensions have homepage sampling. MangaDex has one English sample via the MangaDex public API (https://api.mangadex.org/docs/). Android extension parsing, download and offline reading require runtime tests. Access restrictions describe the CI request."}
 
 
 def markdown(report):
@@ -109,11 +118,14 @@ def markdown(report):
     lines = ["# Seiryn extension availability report", "",
              f"Checked {report['extensionCount']} extensions / {report['sourceIdentityCount']} source identities; {report['uniqueOriginsProbed']} distinct HTTPS homepages.",
              f"**OK:** {counts['OK']} · **Degraded:** {counts['DEGRADED']} · **Error:** {counts['ERROR']}", "",
-             "**Functional checks (discovery, manga details, chapter list, images, downloads): NOT TESTED; Kotlin runtime execution is required.**", "",
-             "| Extension | Result | Homepage observations |", "|---|---|---|"]
+             "| Extension | Result | Homepage observations | Functional stages (discovery, details, chapters, images, download) |", "|---|---|---|---|"]
     for item in report["extensions"]:
         details = "; ".join(f"{s['url']} ({s.get('category', 'HTTP')}: {s['detail']})" for s in item["samples"])
-        lines.append(f"| {item['name'].replace('|', '/')} | {item['status']} | {details.replace('|', '/')} |")
+        stages = ", ".join(
+            result["status"] + (f" ({result['reason']})" if "reason" in result else "")
+            for result in item["functionalChecks"].values()
+        )
+        lines.append(f"| {item['name'].replace('|', '/')} | {item['status']} | {details.replace('|', '/')} | {stages} |")
     lines.extend(["", "**Limitations:** " + report["limitations"], "",
                   "No APKs, source IDs, credentials, library data or extension configurations were changed."])
     return "\n".join(lines) + "\n"
