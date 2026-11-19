@@ -9,6 +9,7 @@ on:
   pull_request:
     paths:
       - 'scripts/check_extension_health.py'
+      - 'scripts/functional_extension_health.py'
       - 'tests/test_extension_health.py'
       - '.github/workflows/extension-health.yml'
 
@@ -49,7 +50,7 @@ jobs:
         if: steps.cadence.outputs.run == 'true'
         run: |
           python3 -m unittest discover -s tests -p 'test_extension_health.py' -v
-          python3 -m compileall -q scripts/check_extension_health.py
+          python3 -m compileall -q scripts/check_extension_health.py scripts/functional_extension_health.py
 
       - name: Fetch live public extension catalog
         if: steps.cadence.outputs.run == 'true'
@@ -112,10 +113,10 @@ jobs:
           if not bad:
               if matching:
                   subprocess.run(["gh", "issue", "close", str(matching["number"]), "--repo", os.environ["GH_REPO"],
-                                  "--comment", "Latest 48-hour homepage sample is healthy. Closing this monitoring alert."], check=True)
+                                  "--comment", "Latest 48-hour monitoring run found no alerts. Closing this monitoring alert."], check=True)
           else:
               summary = (report_dir / "health.md").read_text() if (report_dir / "health.md").exists() else "Health check failed before report generation. Review GitHub Actions logs."
-              body = ("Automated read-only homepage sampling (not proof that chapter parsing works).\n\n" +
+              body = ("Automated homepage and supported provider API sampling. See the report for stage coverage.\n\n" +
                       summary[:45000] + "\nWorkflow: " + os.environ["GITHUB_SERVER_URL"] + "/" +
                       os.environ["GH_REPO"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"])
               body_file = report_dir / "issue.md"
