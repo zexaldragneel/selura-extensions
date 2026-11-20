@@ -82,6 +82,37 @@ class HealthTests(unittest.TestCase):
                 self.assertEqual(result["discovery"], {"status": "UNKNOWN", "reason": category})
                 self.assertEqual(result["chapter_list"]["status"], "NOT_TESTED")
 
+    def test_asura_checks_public_reading_and_skips_downloads(self):
+        responses = iter([
+            ("text/plain", b"User-agent: *\nDisallow: /api/"),
+            ("text/html", b'<a href="/comics/example">Example</a>'),
+            ("text/html", b'<h1>Example</h1><a href="/comics/example/chapter/1">Read</a>'),
+            ("text/html", b'<img src="https://cdn.asurascans.com/page.webp" alt="Page 1 - Chapter 1">'),
+            ("text/plain", b"User-agent: *\nAllow: /"),
+            ("image/webp", b"RIFF....WEBP"),
+        ])
+        urls = []
+
+        def fetch(url, limit, accept):
+            urls.append(url)
+            mime, body = next(responses)
+            return {"status": "OK"}, {"Content-Type": mime}, body
+
+        stages = functional.check_asura(fetch)
+        self.assertEqual([result["status"] for result in stages.values()], ["PASS"] * 4 + ["NOT_TESTED"])
+        self.assertEqual(urls[-2:], [
+            "https://cdn.asurascans.com/robots.txt", "https://cdn.asurascans.com/page.webp",
+        ])
+
+    def test_asura_robots_denial_stops_before_discovery(self):
+        def fetch(url, limit, accept):
+            self.assertEqual(url, "https://asurascans.com/robots.txt")
+            return {"status": "OK"}, {}, b"User-agent: *\nDisallow: /"
+
+        stages = functional.check_asura(fetch)
+        self.assertEqual(stages["discovery"], {"status": "UNKNOWN", "reason": "ROBOTS_DISALLOWED"})
+        self.assertEqual(stages["chapter_images"]["status"], "NOT_TESTED")
+
     def test_image_signatures_distinguish_html_and_images(self):
         self.assertFalse(functional.image_signature(b"<html>Access denied</html>"))
         self.assertTrue(functional.image_signature(b"RIFF....WEBP"))

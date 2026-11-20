@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
 
 from audit_extension_apks import checked_catalog
-from functional_extension_health import MANGADEX, STAGES, check_mangadex
+from functional_extension_health import ASURA, MANGADEX, STAGES, check_asura, check_mangadex
 
 
 class SafeRedirect(HTTPRedirectHandler):
@@ -20,6 +20,11 @@ class SafeRedirect(HTTPRedirectHandler):
         if not public_https(newurl):
             raise ValueError("Unsafe redirect target")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def public_https(url):
@@ -52,6 +57,8 @@ def classify_response(status, headers=None, body=b""):
         return {"status": "DEGRADED", "category": "HOMEPAGE_NOT_FOUND", "detail": "HTTP 404"}
     if status >= 500:
         return {"status": "ERROR", "category": "SERVER_ERROR", "detail": f"HTTP {status}"}
+    if 300 <= status < 400:
+        return {"status": "DEGRADED", "category": "REDIRECT", "detail": f"HTTP {status}"}
     if 200 <= status < 300:
         return {"status": "OK", "category": "HOMEPAGE_REACHABLE", "detail": f"HTTP {status}"}
     return {"status": "DEGRADED", "category": "HTTP_ERROR", "detail": f"HTTP {status}"}
@@ -79,9 +86,13 @@ def fetch(url, opener, limit=4096, accept="text/html,application/xhtml+xml,*/*;q
 def audit(catalog, delay=1.5, probe_fn=None, functional_fetch=None):
     pairs = checked_catalog(catalog)
     opener = build_opener(HTTPSHandler(), SafeRedirect())
+    asura_opener = build_opener(HTTPSHandler(), NoRedirect())
+
     def provider_fetch(url, limit, accept):
         time.sleep(delay)
-        return fetch(url, opener, limit, accept)
+        return fetch(url, asura_opener if urlparse(url).hostname in {
+            "asurascans.com", "cdn.asurascans.com",
+        } else opener, limit, accept)
 
     probe_fn = probe_fn or (lambda url: fetch(url, opener)[0])
     functional_fetch = functional_fetch or provider_fetch
@@ -102,15 +113,22 @@ def audit(catalog, delay=1.5, probe_fn=None, functional_fetch=None):
         functional = {stage: {"status": "NOT_TESTED", "reason": "NO_PROVIDER_ADAPTER"} for stage in STAGES}
         if spec["package"] == MANGADEX:
             functional = check_mangadex(functional_fetch)
-            if status == "OK" and any(stage["status"] in {"FAIL", "UNKNOWN"} for stage in functional.values()):
-                status = "DEGRADED"
+        elif spec["package"] == ASURA:
+            functional = {stage: {"status": "NOT_TESTED"} for stage in STAGES}
+            if status == "OK":
+                functional = check_asura(functional_fetch)
+            else:
+                functional["discovery"] = {"status": "UNKNOWN", "reason": samples[0].get("category", "HOMEPAGE_UNAVAILABLE")}
+                functional["download"]["reason"] = "OUT_OF_SCOPE"
+        if status == "OK" and any(stage["status"] in {"FAIL", "UNKNOWN"} for stage in functional.values()):
+            status = "DEGRADED"
         results.append({"name": spec["name"], "package": spec["package"], "status": status, "samples": samples,
                         "functionalChecks": functional,
                         "sourceCount": len(row["sources"])})
     return {"checkedAt": dt.datetime.now(dt.timezone.utc).isoformat(), "extensionCount": len(results),
             "sourceIdentityCount": sum(r["sourceCount"] for r in results),
             "uniqueOriginsProbed": len(cached), "extensions": results,
-            "limitations": "All extensions have homepage sampling. MangaDex has one English sample via the MangaDex public API (https://api.mangadex.org/docs/). Android extension parsing, download and offline reading require runtime tests. Access restrictions describe the CI request."}
+            "limitations": "All extensions have homepage sampling. MangaDex has one English sample via the MangaDex public API (https://api.mangadex.org/docs/). Asura Scans samples public HTML and one reader image when access permits. Android extension parsing requires runtime tests. Access restrictions describe the CI request."}
 
 
 def markdown(report):
