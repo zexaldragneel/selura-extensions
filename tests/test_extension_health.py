@@ -137,6 +137,30 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(stages["chapter_list"], {"status": "FAIL", "reason": "EMPTY_CHAPTER_LIST"})
         self.assertEqual(stages["chapter_images"]["status"], "NOT_TESTED")
 
+    def test_public_series_providers_sample_chapters_and_images(self):
+        for package, chapter, alt in (
+            (functional.HIPERDEX, "218", "Page 1"),
+            (functional.TOONILY, "chapter-266", "Dungeon Reset Manhwa - Chapter 266 Page 0"),
+        ):
+            with self.subTest(package=package):
+                origin, series, _, _, image_origin = functional.PUBLIC_SERIES[package]
+                image = image_origin + "/page.jpg"
+                pages = {
+                    origin + series + "/": f'<h1>Sample</h1><a href="{series}/{chapter}/">Read</a>',
+                    origin + series + "/" + chapter + "/": f'<img data-src="{image}" alt="{alt}">',
+                }
+
+                def fetch(url, limit, accept):
+                    if url.endswith("/robots.txt"):
+                        return {"status": "OK"}, {}, b"User-agent: *\nAllow: /"
+                    if url == image:
+                        return {"status": "OK", "elapsedMs": 4200}, {"Content-Type": "image/jpeg"}, b"\xff\xd8\xff"
+                    return {"status": "OK"}, {"Content-Type": "text/html"}, pages[url].encode()
+
+                stages = functional.check_public_series(fetch, package)
+                self.assertEqual(stages["chapter_list"]["status"], "PASS")
+                self.assertEqual(stages["chapter_images"]["status"], "SLOW")
+
     def test_image_signatures_distinguish_html_and_images(self):
         self.assertFalse(functional.image_signature(b"<html>Access denied</html>"))
         self.assertTrue(functional.image_signature(b"RIFF....WEBP"))
