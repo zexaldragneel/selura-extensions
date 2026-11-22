@@ -6,6 +6,7 @@ from urllib.parse import urlencode, urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 from uuid import UUID
 
+SLOW_IMAGE_MS = 4000
 STAGES = ("discovery", "manga_details", "chapter_list", "chapter_images", "download")
 MANGADEX = "eu.kanade.tachiyomi.extension.all.seluramangadex"
 API = "https://api.mangadex.org"
@@ -41,6 +42,25 @@ def checked_fetch(fetch, url, limit, accept):
             "reason": category,
         })
     return headers, data
+
+
+def sample_image(fetch, url):
+    def measured_fetch(url, limit, accept):
+        nonlocal elapsed_ms
+        observation, headers, body = fetch(url, limit, accept)
+        elapsed_ms = observation.get("elapsedMs")
+        return observation, headers, body
+
+    elapsed_ms = None
+    headers, body = checked_fetch(measured_fetch, url, 4096, "image/*")
+    if not headers.get("Content-Type", "").lower().startswith("image/") or not image_signature(body):
+        raise ValueError("Expected page image bytes")
+    result = {"status": "PASS", "reason": "SAMPLED_ONE_PAGE"}
+    if elapsed_ms is not None:
+        result["elapsedMs"] = elapsed_ms
+        if elapsed_ms >= SLOW_IMAGE_MS:
+            result.update(status="SLOW", reason="SLOW_IMAGE_SAMPLE")
+    return result
 
 
 
@@ -79,7 +99,7 @@ def check_mangadex(fetch):
             "includeExternalUrl": 0, "order[publishAt]": "desc",
         })["data"]
         if not chapters:
-            raise ValueError("Empty chapter list")
+            raise ProbeStopped({"status": "FAIL", "reason": "EMPTY_CHAPTER_LIST"})
         results[stage] = {"status": "PASS"}
         stage = "chapter_images"
         sample = next((entry for entry in chapters if entry["attributes"]["pages"] > 0
@@ -96,10 +116,7 @@ def check_mangadex(fetch):
                 or not re.fullmatch(r"[a-f0-9]{16,128}", chapter_hash)
                 or not re.fullmatch(r"[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|gif|webp)", filename, re.I)):
             raise ValueError("Invalid page URL")
-        headers, body = checked_fetch(fetch, f"https://{base.netloc}/data/{chapter_hash}/{filename}", 4096, "image/*")
-        if not headers.get("Content-Type", "").lower().startswith("image/") or not image_signature(body):
-            raise ValueError("Page response did not contain image bytes")
-        results[stage] = {"status": "PASS", "reason": "SAMPLED_ONE_PAGE"}
+        results[stage] = sample_image(fetch, f"https://{base.netloc}/data/{chapter_hash}/{filename}")
     except ProbeStopped as exc:
         results[stage] = exc.outcome
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
@@ -124,7 +141,7 @@ def check_asura(fetch):
     rules_by_origin = {}
     stage = "discovery"
 
-    def get(url, limit, accept):
+    def allowed_fetch(url, limit, accept):
         parsed = urlsplit(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
         if origin not in {ASURA_ORIGIN, ASURA_CDN}:
@@ -142,10 +159,10 @@ def check_asura(fetch):
             rules_by_origin[origin] = rules
         if not rules_by_origin[origin].can_fetch("SeirynExtensionHealth", url):
             raise ProbeStopped({"status": "UNKNOWN", "reason": "ROBOTS_DISALLOWED"})
-        return checked_fetch(fetch, url, limit, accept)
+        return fetch(url, limit, accept)
 
     def page(url):
-        headers, body = get(url, 2 * 1024 * 1024, "text/html")
+        headers, body = checked_fetch(allowed_fetch, url, 2 * 1024 * 1024, "text/html")
         if not headers.get("Content-Type", "").lower().startswith("text/html"):
             raise ValueError("Expected an HTML page")
         return AsuraPage(body)
@@ -170,7 +187,7 @@ def check_asura(fetch):
         stage = "chapter_list"
         chapters = set(links(details, re.escape(series) + r"/chapter/[0-9]+(?:\.[0-9]+)?"))
         if not chapters:
-            raise ValueError("No public chapter links")
+            raise ProbeStopped({"status": "FAIL", "reason": "EMPTY_CHAPTER_LIST"})
         results[stage] = {"status": "PASS"}
         stage = "chapter_images"
         chapter = min(chapters, key=lambda path: (float(path.rsplit("/", 1)[-1]), path))
@@ -178,10 +195,7 @@ def check_asura(fetch):
         image = next(attrs["src"] for tag, attrs in reader.tags
                      if tag == "img" and attrs.get("src", "").startswith(ASURA_CDN + "/")
                      and re.match(r"Page 1 - Chapter ", attrs.get("alt") or ""))
-        headers, body = get(image, 4096, "image/*")
-        if not headers.get("Content-Type", "").lower().startswith("image/") or not image_signature(body):
-            raise ValueError("Expected page image bytes")
-        results[stage] = {"status": "PASS", "reason": "SAMPLED_ONE_PAGE"}
+        results[stage] = sample_image(allowed_fetch, image)
     except ProbeStopped as exc:
         results[stage] = exc.outcome
     except (StopIteration, ValueError):
