@@ -12,7 +12,9 @@ from urllib.parse import urlparse
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
 
 from audit_extension_apks import checked_catalog
-from functional_extension_health import ASURA, MANGADEX, STAGES, check_asura, check_mangadex
+from functional_extension_health import (
+    ASURA, MANGADEX, PUBLIC_SERIES, STAGES, check_asura, check_mangadex, check_public_series,
+)
 
 
 class SafeRedirect(HTTPRedirectHandler):
@@ -69,10 +71,13 @@ def fetch(url, opener, limit=4096, accept="text/html,application/xhtml+xml,*/*;q
     if not public_https(url):
         return {"status": "ERROR", "category": "UNSAFE_URL", "detail": "Invalid or non-public HTTPS origin"}, *empty
     request = Request(url, headers={"User-Agent": "SeirynExtensionHealth/1.0 (read-only; GitHub Actions)", "Accept": accept})
+    started = time.monotonic()
     try:
         with opener.open(request, timeout=12) as response:
             body = response.read(limit)
-            return classify_response(response.status, response.headers, body), response.headers, body
+            observation = classify_response(response.status, response.headers, body)
+            observation["elapsedMs"] = round((time.monotonic() - started) * 1000)
+            return observation, response.headers, body
     except HTTPError as exc:
         try:
             body = exc.read(4096)
@@ -86,13 +91,14 @@ def fetch(url, opener, limit=4096, accept="text/html,application/xhtml+xml,*/*;q
 def audit(catalog, delay=1.5, probe_fn=None, functional_fetch=None):
     pairs = checked_catalog(catalog)
     opener = build_opener(HTTPSHandler(), SafeRedirect())
-    asura_opener = build_opener(HTTPSHandler(), NoRedirect())
+    html_origins = {"asurascans.com", "cdn.asurascans.com"}
+    for origin, _, _, _, image_origin in PUBLIC_SERIES.values():
+        html_origins.update((urlparse(origin).hostname, urlparse(image_origin).hostname))
+    html_opener = build_opener(HTTPSHandler(), NoRedirect())
 
     def provider_fetch(url, limit, accept):
         time.sleep(delay)
-        return fetch(url, asura_opener if urlparse(url).hostname in {
-            "asurascans.com", "cdn.asurascans.com",
-        } else opener, limit, accept)
+        return fetch(url, html_opener if urlparse(url).hostname in html_origins else opener, limit, accept)
 
     probe_fn = probe_fn or (lambda url: fetch(url, opener)[0])
     functional_fetch = functional_fetch or provider_fetch
@@ -120,7 +126,12 @@ def audit(catalog, delay=1.5, probe_fn=None, functional_fetch=None):
             else:
                 functional["discovery"] = {"status": "UNKNOWN", "reason": samples[0].get("category", "HOMEPAGE_UNAVAILABLE")}
                 functional["download"]["reason"] = "OUT_OF_SCOPE"
-        if status == "OK" and any(stage["status"] in {"FAIL", "UNKNOWN"} for stage in functional.values()):
+        elif spec["package"] in PUBLIC_SERIES:
+            if status == "OK":
+                functional = check_public_series(functional_fetch, spec["package"])
+            else:
+                functional["manga_details"] = {"status": "UNKNOWN", "reason": samples[0]["category"]}
+        if status == "OK" and any(stage["status"] in {"FAIL", "UNKNOWN", "SLOW"} for stage in functional.values()):
             status = "DEGRADED"
         results.append({"name": spec["name"], "package": spec["package"], "status": status, "samples": samples,
                         "functionalChecks": functional,
@@ -128,7 +139,7 @@ def audit(catalog, delay=1.5, probe_fn=None, functional_fetch=None):
     return {"checkedAt": dt.datetime.now(dt.timezone.utc).isoformat(), "extensionCount": len(results),
             "sourceIdentityCount": sum(r["sourceCount"] for r in results),
             "uniqueOriginsProbed": len(cached), "extensions": results,
-            "limitations": "All extensions have homepage sampling. MangaDex has one English sample via the MangaDex public API (https://api.mangadex.org/docs/). Asura Scans samples public HTML and one reader image when access permits. Android extension parsing requires runtime tests. Access restrictions describe the CI request."}
+            "limitations": "All extensions have homepage sampling. MangaDex has one English sample via the MangaDex public API (https://api.mangadex.org/docs/). Asura Scans, Hiperdex and Toonily sample public HTML and one reader image when access and recognized markup permit. Image timing covers the first 4 KiB at most, and samples taking 4 seconds or longer are flagged. Android extension parsing requires runtime tests. Access restrictions describe the CI request."}
 
 
 def markdown(report):
@@ -141,6 +152,7 @@ def markdown(report):
         details = "; ".join(f"{s['url']} ({s.get('category', 'HTTP')}: {s['detail']})" for s in item["samples"])
         stages = ", ".join(
             result["status"] + (f" ({result['reason']})" if "reason" in result else "")
+            + (f" [{result['elapsedMs']} ms]" if "elapsedMs" in result else "")
             for result in item["functionalChecks"].values()
         )
         lines.append(f"| {item['name'].replace('|', '/')} | {item['status']} | {details.replace('|', '/')} | {stages} |")

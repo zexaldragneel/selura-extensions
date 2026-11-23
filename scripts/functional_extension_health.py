@@ -6,6 +6,7 @@ from urllib.parse import urlencode, urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 from uuid import UUID
 
+SLOW_IMAGE_MS = 4000
 STAGES = ("discovery", "manga_details", "chapter_list", "chapter_images", "download")
 MANGADEX = "eu.kanade.tachiyomi.extension.all.seluramangadex"
 API = "https://api.mangadex.org"
@@ -41,6 +42,25 @@ def checked_fetch(fetch, url, limit, accept):
             "reason": category,
         })
     return headers, data
+
+
+def sample_image(fetch, url):
+    def measured_fetch(url, limit, accept):
+        nonlocal elapsed_ms
+        observation, headers, body = fetch(url, limit, accept)
+        elapsed_ms = observation.get("elapsedMs")
+        return observation, headers, body
+
+    elapsed_ms = None
+    headers, body = checked_fetch(measured_fetch, url, 4096, "image/*")
+    if not headers.get("Content-Type", "").lower().startswith("image/") or not image_signature(body):
+        raise ValueError("Expected page image bytes")
+    result = {"status": "PASS", "reason": "SAMPLED_ONE_PAGE"}
+    if elapsed_ms is not None:
+        result["elapsedMs"] = elapsed_ms
+        if elapsed_ms >= SLOW_IMAGE_MS:
+            result.update(status="SLOW", reason="SLOW_IMAGE_SAMPLE")
+    return result
 
 
 
@@ -79,7 +99,7 @@ def check_mangadex(fetch):
             "includeExternalUrl": 0, "order[publishAt]": "desc",
         })["data"]
         if not chapters:
-            raise ValueError("Empty chapter list")
+            raise ProbeStopped({"status": "FAIL", "reason": "EMPTY_CHAPTER_LIST"})
         results[stage] = {"status": "PASS"}
         stage = "chapter_images"
         sample = next((entry for entry in chapters if entry["attributes"]["pages"] > 0
@@ -96,10 +116,7 @@ def check_mangadex(fetch):
                 or not re.fullmatch(r"[a-f0-9]{16,128}", chapter_hash)
                 or not re.fullmatch(r"[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|gif|webp)", filename, re.I)):
             raise ValueError("Invalid page URL")
-        headers, body = checked_fetch(fetch, f"https://{base.netloc}/data/{chapter_hash}/{filename}", 4096, "image/*")
-        if not headers.get("Content-Type", "").lower().startswith("image/") or not image_signature(body):
-            raise ValueError("Page response did not contain image bytes")
-        results[stage] = {"status": "PASS", "reason": "SAMPLED_ONE_PAGE"}
+        results[stage] = sample_image(fetch, f"https://{base.netloc}/data/{chapter_hash}/{filename}")
     except ProbeStopped as exc:
         results[stage] = exc.outcome
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
@@ -118,17 +135,14 @@ class AsuraPage(HTMLParser):
         self.tags.append((tag, dict(attrs)))
 
 
-def check_asura(fetch):
-    results = {stage: {"status": "NOT_TESTED"} for stage in STAGES}
-    results["download"] = {"status": "NOT_TESTED", "reason": "OUT_OF_SCOPE"}
+def public_html_fetch(fetch, origins):
     rules_by_origin = {}
-    stage = "discovery"
 
-    def get(url, limit, accept):
+    def allowed_fetch(url, limit, accept):
         parsed = urlsplit(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
-        if origin not in {ASURA_ORIGIN, ASURA_CDN}:
-            raise ValueError("Unexpected Asura host")
+        if origin not in origins:
+            raise ValueError("Unexpected provider host")
         if origin not in rules_by_origin:
             observation, _, body = fetch(origin + "/robots.txt", 64 * 1024, "text/plain")
             rules = RobotFileParser()
@@ -142,10 +156,19 @@ def check_asura(fetch):
             rules_by_origin[origin] = rules
         if not rules_by_origin[origin].can_fetch("SeirynExtensionHealth", url):
             raise ProbeStopped({"status": "UNKNOWN", "reason": "ROBOTS_DISALLOWED"})
-        return checked_fetch(fetch, url, limit, accept)
+        return fetch(url, limit, accept)
+
+    return allowed_fetch
+
+
+def check_asura(fetch):
+    results = {stage: {"status": "NOT_TESTED"} for stage in STAGES}
+    results["download"] = {"status": "NOT_TESTED", "reason": "OUT_OF_SCOPE"}
+    stage = "discovery"
+    allowed_fetch = public_html_fetch(fetch, {ASURA_ORIGIN, ASURA_CDN})
 
     def page(url):
-        headers, body = get(url, 2 * 1024 * 1024, "text/html")
+        headers, body = checked_fetch(allowed_fetch, url, 2 * 1024 * 1024, "text/html")
         if not headers.get("Content-Type", "").lower().startswith("text/html"):
             raise ValueError("Expected an HTML page")
         return AsuraPage(body)
@@ -170,7 +193,7 @@ def check_asura(fetch):
         stage = "chapter_list"
         chapters = set(links(details, re.escape(series) + r"/chapter/[0-9]+(?:\.[0-9]+)?"))
         if not chapters:
-            raise ValueError("No public chapter links")
+            raise ProbeStopped({"status": "FAIL", "reason": "EMPTY_CHAPTER_LIST"})
         results[stage] = {"status": "PASS"}
         stage = "chapter_images"
         chapter = min(chapters, key=lambda path: (float(path.rsplit("/", 1)[-1]), path))
@@ -178,12 +201,67 @@ def check_asura(fetch):
         image = next(attrs["src"] for tag, attrs in reader.tags
                      if tag == "img" and attrs.get("src", "").startswith(ASURA_CDN + "/")
                      and re.match(r"Page 1 - Chapter ", attrs.get("alt") or ""))
-        headers, body = get(image, 4096, "image/*")
-        if not headers.get("Content-Type", "").lower().startswith("image/") or not image_signature(body):
-            raise ValueError("Expected page image bytes")
-        results[stage] = {"status": "PASS", "reason": "SAMPLED_ONE_PAGE"}
+        results[stage] = sample_image(allowed_fetch, image)
     except ProbeStopped as exc:
         results[stage] = exc.outcome
     except (StopIteration, ValueError):
+        results[stage] = {"status": "FAIL", "reason": "MISSING_OR_INVALID_" + stage.upper()}
+    return results
+
+HIPERDEX = "eu.kanade.tachiyomi.extension.en.selurahiperdex"
+TOONILY = "eu.kanade.tachiyomi.extension.en.seluratoonily"
+PUBLIC_SERIES = {
+    HIPERDEX: ("https://hiperdex.tv", "/manga/how-to-fight",
+               r"[0-9]+(?:\.[0-9]+)?", r"Page 1", "https://hiperdex.tv"),
+    TOONILY: ("https://toonily.com", "/serie/dungeon-reset-f6fe1207",
+              r"chapter-[0-9]+(?:[.-][0-9]+)?", r".+ Page [0-9]+", "https://data.tnlycdn.com"),
+}
+
+
+def check_public_series(fetch, package):
+    origin, series, chapter_pattern, image_alt, image_origin = PUBLIC_SERIES[package]
+    allowed_fetch = public_html_fetch(fetch, {origin, image_origin})
+    results = {stage: {"status": "NOT_TESTED"} for stage in STAGES}
+    results["discovery"]["reason"] = "FIXED_PUBLIC_SERIES"
+    results["download"]["reason"] = "ANDROID_DOWNLOADER_REQUIRED"
+    stage = "manga_details"
+
+    def page(url):
+        headers, body = checked_fetch(allowed_fetch, url, 2 * 1024 * 1024, "text/html")
+        if not headers.get("Content-Type", "").lower().startswith("text/html"):
+            raise ValueError("Expected HTML")
+        return AsuraPage(body)
+
+    try:
+        details = page(origin + series + "/")
+        if not any(tag == "h1" for tag, _ in details.tags):
+            raise ValueError("Missing title heading")
+        results[stage] = {"status": "PASS"}
+        stage = "chapter_list"
+        chapter = None
+        for tag, attrs in details.tags:
+            if tag == "a" and attrs.get("href"):
+                candidate = urljoin(origin + series + "/", attrs["href"])
+                if re.fullmatch(re.escape(origin + series) + "/" + chapter_pattern + "/?", candidate):
+                    chapter = candidate
+                    break
+        if chapter is None:
+            raise ProbeStopped({"status": "FAIL", "reason": "EMPTY_CHAPTER_LIST"})
+        results[stage] = {"status": "PASS"}
+        stage = "chapter_images"
+        for tag, attrs in page(chapter).tags:
+            if tag != "img" or not re.fullmatch(image_alt, attrs.get("alt") or "", re.I):
+                continue
+            for attr in ("data-src", "data-lazy-src", "src"):
+                if not attrs.get(attr):
+                    continue
+                url = urljoin(chapter, attrs[attr].strip())
+                if url.startswith(image_origin + "/"):
+                    results[stage] = sample_image(allowed_fetch, url)
+                    return results
+        raise ProbeStopped({"status": "UNKNOWN", "reason": "NO_RECOGNIZED_PUBLIC_IMAGE"})
+    except ProbeStopped as exc:
+        results[stage] = exc.outcome
+    except ValueError:
         results[stage] = {"status": "FAIL", "reason": "MISSING_OR_INVALID_" + stage.upper()}
     return results
